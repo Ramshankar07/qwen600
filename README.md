@@ -4,18 +4,21 @@
   <img src="assets/banner.png" width="429" height="139" alt="banner_">
 </p>
 
-While studying and practicing  CUDA & GPGPU, thought why not make an inference engine from scratch ? So, chose [QWEN3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) model, small model than can run smoothly on my `RTX 3050 8GB` VRAM.
+While studying and practicing CUDA & GPGPU, thought why not make an inference engine from scratch ? So, chose [QWEN3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) model, small model than can run smoothly on my `RTX 3050 8GB` VRAM.
 My intention was (and still) to build educational program to learn about LLMs & transformers while maintaining practice in CUDA programming.
 
-I'm introducing static mini inference engine for `QWEN3-0.6B` instruct model in `bf16`, where its benchmarking claims that it's faster than [llama.cpp](https://github.com/ggml-org/llama.cpp) by approximately `8.5%` & `hf with flash-attn` by `292%` in `tokens/sec`, *see benchmarks below*.
+**Now includes AMD ROCm/HIP version** for AMD GPUs! 🚀
+
+I'm introducing static mini inference engine for `QWEN3-0.6B` instruct model in `bf16`, where its CUDA benchmarking claims that it's faster than [llama.cpp](https://github.com/ggml-org/llama.cpp) by approximately `8.5%` & `hf with flash-attn` by `292%` in `tokens/sec`, *see benchmarks below*. AMD HIP version performance testing is pending.
 
 ---
 
 What does `qwen600` include:
 - single batch inference engine
 - static-constanted for compile-time optimization
-- all CUDA C/C++, no python dependencies (except for tokenizer setup)
-- minimal libraries (cuBLAS, CUB, std IO)
+- **CUDA version**: all CUDA C/C++, minimal libraries (cuBLAS, CUB, std IO)
+- **HIP version**: AMD ROCm/HIP support, minimal libraries (hipBLAS, hipCUB, std IO)
+- no python dependencies (except for tokenizer setup)
 - efficient memory pipeline: mmap, single GPU block, async copy
 - zero-cost pointer-based weight management on GPU
 
@@ -38,6 +41,13 @@ What does `qwen600` include:
 - Configuration is done directly in the source code `config.h` as much as possible, and dependencies are kept to an absolute minimum.
 
 ## WANNA TRY ?!
+
+### Quick Start
+
+| Version | GPU | Build Command | Run Command |
+|---------|-----|---------------|-------------|
+| **CUDA** | NVIDIA | `mkdir build && cd build && cmake .. && make -j$(nproc)` | `./qwen600 <model_dir> -r 1` |
+| **HIP** | AMD | `./build_hip.sh` | `./build_hip/qwen600_hip <model_dir> -r 1` |
 
 ### Initial Setup
 
@@ -195,6 +205,8 @@ now the responding:
 
 ## Benchmarking
 
+### CUDA Version Benchmarks
+
 These benchmarks are done on same machine:
 - RTX 3050 8BG + CUDA 13.0
 - AMD ryzen 5 3500
@@ -209,17 +221,92 @@ Every test is with the same question `what are llms used for ?` in `THINKING` mo
 | ---              | ---      
 | hf + flash-attn  | 29.57 
 | llama.cpp        | 107.19
-| qwen600          | **116.15**
+| qwen600 (CUDA)   | **116.15**
+
+### AMD HIP Version Benchmarks
+
+**⚠️ AMD benchmarking not yet completed** - Performance metrics pending testing on AMD hardware.
 
 `NOTE`: As I mentioned earlier, it is EDUCATIONAL project for me, I'm not aiming for winning a race, but I think that difference caused by static compile-time optimizations, and some other tweaks and tricks.
+
+## AMD ROCm/HIP Version
+
+This repository now includes an AMD ROCm/HIP version for AMD GPUs! The HIP version maintains the same API and performance characteristics as the CUDA version while enabling execution on AMD hardware.
+
+### 🚀 **HIP Version Features:**
+- **Full CUDA to HIP conversion** - All kernels converted to AMD ROCm/HIP
+- **Multi-GPU architecture support** - gfx906, gfx908, gfx90a, gfx1030, gfx1100
+- **Optimized softmax implementation** with shared memory
+- **BFloat16 support** with conversion utilities
+- **Same API compatibility** as CUDA version
+
+### 📁 **HIP Files:**
+- `main.hip` - AMD ROCm/HIP main application
+- `qwen_model.hip.h` - HIP model implementation
+- `static_loader.hip.h` - HIP weight loading utilities
+- `CMakeLists.hip.txt` - HIP build configuration
+- `build_hip.sh` / `build_hip.bat` - Build scripts
+- `README_HIP.md` - Detailed HIP documentation
+
+### 🛠️ **Building HIP Version:**
+
+#### **Prerequisites:**
+- AMD ROCm/HIP (version 5.0+)
+- CMake 3.20+
+- AMD GPU with ROCm support
+
+#### **Quick Build:**
+```bash
+# Linux/macOS
+chmod +x build_hip.sh
+./build_hip.sh
+
+# Windows
+build_hip.bat
+```
+
+#### **Manual Build:**
+```bash
+mkdir build_hip && cd build_hip
+cmake -f ../CMakeLists.hip.txt \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_CXX_COMPILER=hipcc \
+    -DCMAKE_HIP_ARCHITECTURES="gfx90a" \
+    ..
+make -j$(nproc)
+```
+
+### 🎯 **Usage:**
+```bash
+# Same API as CUDA version
+./build_hip/qwen600_hip <model_dir> -r 1 -t 0.7 -p 0.9
+
+# Example
+./build_hip/qwen600_hip ./models/qwen600 -r 1
+```
+
+### 📊 **Performance:**
+- **Same performance characteristics** as CUDA version (theoretically)
+- **Optimized for AMD GPUs** with architecture-specific builds
+- **ROCm profiler support** for performance analysis
+- **⚠️ Note**: AMD benchmarking not yet completed - performance metrics pending
+
+### 🔗 **Links:**
+- [Detailed HIP Documentation](README_HIP.md)
+- [ROCm Documentation](https://rocm.docs.amd.com/)
+- [HIP Programming Guide](https://rocm.docs.amd.com/en/latest/Programming_Guides/HIP_Programming_Guide.html)
+
+---
 
 ## TODOs
 
 There are still many catches there:
 - [x] Fusing RMSnorm Kernel
 - [x] Fusing skip connections with cuBLAS
-- [ ] Fix Softmax Kernel & Dispatcher
-- [ ] Exploring option of RoPE pre-computed values
+- [x] Fix Softmax Kernel & Dispatcher
+- [] Exploring option of RoPE pre-computed values
+- [x] AMD ROCm/HIP version
+- [] Benchmarking AMD version
 
 ## License
 

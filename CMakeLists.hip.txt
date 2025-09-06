@@ -1,0 +1,74 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(QWEN3_600M_HIP LANGUAGES CXX)
+
+# Find ROCm/HIP
+find_package(hip REQUIRED)
+find_package(hipblas REQUIRED)
+find_package(hipcub REQUIRED)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Set HIP compiler
+set(CMAKE_CXX_COMPILER hipcc)
+
+# GPU architectures for AMD GPUs:
+# gfx906 = Radeon VII, MI50
+# gfx908 = MI100
+# gfx90a = MI200 series
+# gfx1030 = Radeon RX 6000 series
+# gfx1100 = Radeon RX 7000 series
+set(CMAKE_HIP_ARCHITECTURES "gfx906;gfx908;gfx90a;gfx1030;gfx1100")
+
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+message(STATUS "========================")
+message(STATUS "Project: ${PROJECT_NAME}")
+message(STATUS "Targeting HIP Architectures: ${CMAKE_HIP_ARCHITECTURES}")
+message(STATUS "HIP Compiler: ${CMAKE_CXX_COMPILER}")
+
+add_executable(
+    qwen600_hip
+    main.hip
+)
+
+target_link_libraries(
+    qwen600_hip 
+    PRIVATE
+    hip::device
+    hipblas
+    hipcub
+    )
+
+target_compile_options(qwen600_hip PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:--expt-relaxed-constexpr>
+)
+
+set_target_properties(qwen600_hip PROPERTIES COMPILE_FLAGS "-O3")
+
+# disable all warnings for both C++ and HIP
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(qwen600_hip PRIVATE -w)
+endif()
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "HIP")
+    target_compile_options(qwen600_hip PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-w>)
+endif()
+
+# Set HIP specific flags
+target_compile_options(qwen600_hip PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:
+        --offload-arch=gfx906
+        --offload-arch=gfx908
+        --offload-arch=gfx90a
+        --offload-arch=gfx1030
+        --offload-arch=gfx1100
+    >
+)
+
+# Optional: Set specific GPU architecture at compile time
+# Uncomment and modify as needed for your target GPU
+# target_compile_options(qwen600_hip PRIVATE
+#     $<$<COMPILE_LANGUAGE:CXX>:--offload-arch=gfx90a>
+# )
