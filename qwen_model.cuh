@@ -379,8 +379,78 @@ rope_gpu_naive(
 // ================================================================
 // softmax
 // ================================================================
+
+// Optimized softmax kernel using shared memory and better thread utilization
 __global__ void
-softmax_kernel(
+softmax_kernel_optimized(
+    float* att, 
+    int pos)
+{
+    // grid: N_HEADS, block: min(1024, pos + 1)
+    int h = blockIdx.x;
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    int len = pos + 1;
+
+    float* scores = att + (size_t)h * SEQ_LEN;
+
+    // Shared memory for reduction
+    extern __shared__ float sdata[];
+    float* s_max = sdata;
+    float* s_sum = sdata + block_size;
+
+    // Find max value for numerical stability (parallel reduction)
+    float thread_max = -INFINITY;
+    for (int i = tid; i < len; i += block_size)
+    {
+        if (scores[i] > thread_max) { thread_max = scores[i]; }
+    }
+    s_max[tid] = thread_max;
+    __syncthreads();
+
+    // Reduce to find global max
+    for (int s = block_size / 2; s > 0; s >>= 1)
+    {
+        if (tid < s)
+        {
+            if (s_max[tid + s] > s_max[tid]) { s_max[tid] = s_max[tid + s]; }
+        }
+        __syncthreads();
+    }
+    float max_val = s_max[0];
+
+    // Compute exp and sum (parallel)
+    float thread_sum = 0.0f;
+    for (int i = tid; i < len; i += block_size)
+    {
+        scores[i] = expf(scores[i] - max_val);
+        thread_sum += scores[i];
+    }
+    s_sum[tid] = thread_sum;
+    __syncthreads();
+
+    // Reduce to find global sum
+    for (int s = block_size / 2; s > 0; s >>= 1)
+    {
+        if (tid < s)
+        {
+            s_sum[tid] += s_sum[tid + s];
+        }
+        __syncthreads();
+    }
+    float sum = s_sum[0];
+
+    // Normalize (parallel)
+    float inv_sum = 1.0f / sum;
+    for (int i = tid; i < len; i += block_size)
+    {
+        scores[i] *= inv_sum;
+    }
+}
+
+// Fallback softmax kernel for very small sequences
+__global__ void
+softmax_kernel_simple(
     float* att, 
     int pos)
 {
@@ -391,8 +461,7 @@ softmax_kernel(
     int len = pos + 1;
 
     // find max value for numerical stability
-    // float max_val = -HUGE_VALF;
-    float max_val = -1e9f;
+    float max_val = -INFINITY;
     for (int i = 0; i < len; i++)
     {
         if (scores[i] > max_val) { max_val = scores[i]; }
@@ -410,6 +479,71 @@ softmax_kernel(
     float inv_sum = 1.0f / sum;
     for (int i = 0; i < len; i++) { scores[i] *= inv_sum; }
 }
+
+// --------------------------------------------------------------
+// Softmax dispatcher function with error handling
+// --------------------------------------------------------------
+void
+softmax_gpu(
+    float* att, 
+    int pos)
+{
+    // Input validation
+    if (att == nullptr)
+    {
+        printf("Error: Null pointer passed to softmax_gpu\n");
+        return;
+    }
+    
+    if (pos < 0 || pos >= SEQ_LEN)
+    {
+        printf("Error: Invalid position %d for softmax (SEQ_LEN=%d)\n", pos, SEQ_LEN);
+        return;
+    }
+
+    int len = pos + 1;
+    
+    // Choosing kernel based on sequence length 
+    if (len <= 32)
+    {
+        // Use simple kernel for very short sequences
+        softmax_kernel_simple<<<N_HEADS, 1>>>(att, pos);
+    }
+    else
+    {
+        int block_size = std::min(1024, len);
+        
+        // Checking if we have enough shared memory
+        size_t shared_mem_size = 2 * block_size * sizeof(float);
+        int max_shared_mem;
+        cudaDeviceGetAttribute(&max_shared_mem, cudaDevAttrMaxSharedMemoryPerBlock, 0);
+        
+        if (shared_mem_size > max_shared_mem)
+        {
+            // Falling back to simple kernel if not enough shared memory
+            printf("Warning: Not enough shared memory for optimized softmax, using simple kernel\n");
+            softmax_kernel_simple<<<N_HEADS, 1>>>(att, pos);
+        }
+        else
+        {
+            softmax_kernel_optimized<<<N_HEADS, block_size, shared_mem_size>>>(att, pos);
+        }
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+    {
+        printf("CUDA error in softmax kernel: %s\n", cudaGetErrorString(err));
+        return;
+    }
+
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess)
+    {
+        printf("CUDA synchronization error in softmax: %s\n", cudaGetErrorString(err));
+    }
+}
+
 
 // ================================================================
 // Attention
@@ -495,7 +629,7 @@ attention_gpu(
     );
 
     // kernel 2: softmax
-    softmax_kernel<<<N_HEADS, 1>>>(s->att, pos);
+    softmax_gpu(s->att, pos);
 
     // kernel 3: aggregate V values
     attention_v_kernel<<<N_HEADS, HEAD_DIM>>>(
