@@ -1,8 +1,5 @@
 # qwen600.cu
 
-<p align="center">
-  <img src="assets/banner.png" width="429" height="139" alt="banner_">
-</p>
 
 While studying and practicing CUDA & GPGPU, thought why not make an inference engine from scratch ? So, chose [QWEN3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) model, small model than can run smoothly on my `RTX 3050 8GB` VRAM.
 My intention was (and still) to build educational program to learn about LLMs & transformers while maintaining practice in CUDA programming.
