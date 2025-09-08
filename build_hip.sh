@@ -28,13 +28,14 @@ fi
 mkdir -p build_hip
 cd build_hip
 
-# Configure with CMake
+# Configure with CMake (use HIP CMakeLists)
 echo "Configuring with CMake..."
-cmake -f ../CMakeLists.hip.txt \
+# Copy HIP CMakeLists so CMake picks it up as the project file
+cp -f ../CMakeLists.hip.txt ./CMakeLists.txt
+cmake -S . -B . \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_COMPILER=hipcc \
-    -DCMAKE_HIP_ARCHITECTURES="gfx906;gfx908;gfx90a;gfx1030;gfx1100" \
-    ..
+    -DCMAKE_HIP_ARCHITECTURES="gfx906;gfx908;gfx90a;gfx1030;gfx1100"
 
 # Build
 echo "Building..."

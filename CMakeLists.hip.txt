@@ -1,25 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(QWEN3_600M_HIP LANGUAGES CXX)
+project(QWEN3_600M_HIP LANGUAGES CXX HIP)
 
 # Find ROCm/HIP
 find_package(hip REQUIRED)
 find_package(hipblas REQUIRED)
-find_package(hipcub REQUIRED)
+# hipCUB is header-only in many ROCm releases; find it optionally
+# and include headers manually if the imported target is unavailable.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Set HIP compiler
+# Ensure HIP language is enabled
+enable_language(HIP)
+
+# Prefer hipcc as the compiler
 set(CMAKE_CXX_COMPILER hipcc)
 
-# GPU architectures for AMD GPUs:
-# gfx906 = Radeon VII, MI50
-# gfx908 = MI100
-# gfx90a = MI200 series
-# gfx1030 = Radeon RX 6000 series
-# gfx1100 = Radeon RX 7000 series
-set(CMAKE_HIP_ARCHITECTURES "gfx906;gfx908;gfx90a;gfx1030;gfx1100")
+# GPU architecture: detected as gfx942 (MI300/XDNA variant)
+set(CMAKE_HIP_ARCHITECTURES "gfx942")
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -28,22 +27,37 @@ message(STATUS "Project: ${PROJECT_NAME}")
 message(STATUS "Targeting HIP Architectures: ${CMAKE_HIP_ARCHITECTURES}")
 message(STATUS "HIP Compiler: ${CMAKE_CXX_COMPILER}")
 
-add_executable(
-    qwen600_hip
-    main.hip
-)
+# When this CMakeLists is copied into the build directory, make sure we
+# reference sources from the project root.
+set(PROJECT_ROOT_DIR "${CMAKE_CURRENT_LIST_DIR}")
+get_filename_component(PROJECT_ROOT_DIR "${PROJECT_ROOT_DIR}" DIRECTORY)
+
+# Some ROCm distributions don't export hip_add_executable; fall back to
+# standard CMake with explicit HIP language hints.
+set(SRC_MAIN_HIP ${PROJECT_ROOT_DIR}/main.hip)
+set_source_files_properties(${SRC_MAIN_HIP} PROPERTIES LANGUAGE HIP)
+
+add_executable(qwen600_hip ${SRC_MAIN_HIP})
+set_target_properties(qwen600_hip PROPERTIES LINKER_LANGUAGE HIP)
 
 target_link_libraries(
     qwen600_hip 
     PRIVATE
     hip::device
     hipblas
-    hipcub
     )
 
 target_compile_options(qwen600_hip PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:--expt-relaxed-constexpr>
 )
+
+# Manually add hipCUB includes if present (header-only)
+if (EXISTS "/opt/rocm/include/hipcub")
+    target_include_directories(qwen600_hip PRIVATE "/opt/rocm/include")
+endif()
+if (EXISTS "/opt/rocm-5.7.0/include/hipcub")
+    target_include_directories(qwen600_hip PRIVATE "/opt/rocm-5.7.0/include")
+endif()
 
 set_target_properties(qwen600_hip PROPERTIES COMPILE_FLAGS "-O3")
 
@@ -58,12 +72,8 @@ endif()
 
 # Set HIP specific flags
 target_compile_options(qwen600_hip PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:
-        --offload-arch=gfx906
-        --offload-arch=gfx908
-        --offload-arch=gfx90a
-        --offload-arch=gfx1030
-        --offload-arch=gfx1100
+    $<$<COMPILE_LANGUAGE:HIP>:
+        --offload-arch=gfx942
     >
 )
 

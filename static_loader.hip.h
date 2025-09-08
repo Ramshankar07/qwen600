@@ -9,7 +9,7 @@
 #include <numeric>
 
 #include <hip/hip_runtime.h>
-#include <hip_bfloat16.h>
+#include <hip/hip_bfloat16.h>
 
 // memory mapping on Linux/macOS
 #include <sys/mman.h>
@@ -32,7 +32,7 @@
 namespace qwen_loader
 {
 
-using bf16 = __hip_bfloat16;
+using bf16 = hip_bfloat16;
 
 struct
 AttentionWeights
@@ -71,42 +71,15 @@ QwenWeights
     std::vector<TransformerBlockWeights> layers;
 };
 
-// Helper function to convert __nv_bfloat16 to __hip_bfloat16
-inline __hip_bfloat16 nv_to_hip_bfloat16(__nv_bfloat16 nv_val)
+// Copy bf16 bytes from mapped host memory to device memory
+inline void copy_bf16_bytes_to_device(const void* host_src_bf16,
+                                      bf16* device_dst_bf16,
+                                      size_t count)
 {
-    // Direct bitwise conversion since both are 16-bit
-    return *reinterpret_cast<__hip_bfloat16*>(&nv_val);
-}
-
-// Helper function to convert __hip_bfloat16 to __nv_bfloat16
-inline __nv_bfloat16 hip_to_nv_bfloat16(__hip_bfloat16 hip_val)
-{
-    // Direct bitwise conversion since both are 16-bit
-    return *reinterpret_cast<__nv_bfloat16*>(&hip_val);
-}
-
-// Convert array of __nv_bfloat16 to __hip_bfloat16
-void convert_nv_to_hip_bfloat16_array(
-    const __nv_bfloat16* nv_array,
-    __hip_bfloat16* hip_array,
-    size_t count)
-{
-    for (size_t i = 0; i < count; i++)
-    {
-        hip_array[i] = nv_to_hip_bfloat16(nv_array[i]);
-    }
-}
-
-// Convert array of __hip_bfloat16 to __nv_bfloat16
-void convert_hip_to_nv_bfloat16_array(
-    const __hip_bfloat16* hip_array,
-    __nv_bfloat16* nv_array,
-    size_t count)
-{
-    for (size_t i = 0; i < count; i++)
-    {
-        nv_array[i] = hip_to_nv_bfloat16(hip_array[i]);
-    }
+    HIP_CHECK(hipMemcpy(device_dst_bf16,
+                        host_src_bf16,
+                        count * sizeof(bf16),
+                        hipMemcpyHostToDevice));
 }
 
 // Memory mapping utilities
@@ -194,6 +167,7 @@ public:
 
     size_t tell() const { return offset; }
     void seek(size_t pos) { offset = pos; }
+    const void* raw_data() const { return data; }
 };
 
 // Load weights from SafeTensor file
@@ -220,26 +194,22 @@ void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
         // Load token embedding table
         size_t token_embedding_size = VOCAB_SIZE * DIM * sizeof(bf16);
         HIP_CHECK(hipMalloc(&weights.token_embedding_table, token_embedding_size));
-        
-        // Convert from __nv_bfloat16 to __hip_bfloat16 if needed
-        const __nv_bfloat16* nv_token_embedding = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-        convert_nv_to_hip_bfloat16_array(nv_token_embedding, weights.token_embedding_table, VOCAB_SIZE * DIM);
+        const void* te_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+        copy_bf16_bytes_to_device(te_src, weights.token_embedding_table, VOCAB_SIZE * DIM);
         parser.skip(token_embedding_size);
 
         // Load output head weight
         size_t output_head_size = VOCAB_SIZE * DIM * sizeof(bf16);
         HIP_CHECK(hipMalloc(&weights.output_head_weight, output_head_size));
-        
-        const __nv_bfloat16* nv_output_head = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-        convert_nv_to_hip_bfloat16_array(nv_output_head, weights.output_head_weight, VOCAB_SIZE * DIM);
+        const void* oh_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+        copy_bf16_bytes_to_device(oh_src, weights.output_head_weight, VOCAB_SIZE * DIM);
         parser.skip(output_head_size);
 
         // Load final norm weight
         size_t final_norm_size = DIM * sizeof(bf16);
         HIP_CHECK(hipMalloc(&weights.final_norm_weight, final_norm_size));
-        
-        const __nv_bfloat16* nv_final_norm = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-        convert_nv_to_hip_bfloat16_array(nv_final_norm, weights.final_norm_weight, DIM);
+        const void* fn_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+        copy_bf16_bytes_to_device(fn_src, weights.final_norm_weight, DIM);
         parser.skip(final_norm_size);
 
         // Load layer weights
@@ -250,71 +220,71 @@ void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
             // Attention weights
             size_t q_proj_size = Q_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.q_proj_weight, q_proj_size));
-            const __nv_bfloat16* nv_q_proj = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_q_proj, layer.attention.q_proj_weight, Q_DIM * DIM);
+            const void* q_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(q_src, layer.attention.q_proj_weight, Q_DIM * DIM);
             parser.skip(q_proj_size);
 
             size_t k_proj_size = KV_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.k_proj_weight, k_proj_size));
-            const __nv_bfloat16* nv_k_proj = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_k_proj, layer.attention.k_proj_weight, KV_DIM * DIM);
+            const void* k_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(k_src, layer.attention.k_proj_weight, KV_DIM * DIM);
             parser.skip(k_proj_size);
 
             size_t v_proj_size = KV_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.v_proj_weight, v_proj_size));
-            const __nv_bfloat16* nv_v_proj = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_v_proj, layer.attention.v_proj_weight, KV_DIM * DIM);
+            const void* v_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(v_src, layer.attention.v_proj_weight, KV_DIM * DIM);
             parser.skip(v_proj_size);
 
             size_t o_proj_size = DIM * Q_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.o_proj_weight, o_proj_size));
-            const __nv_bfloat16* nv_o_proj = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_o_proj, layer.attention.o_proj_weight, DIM * Q_DIM);
+            const void* o_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(o_src, layer.attention.o_proj_weight, DIM * Q_DIM);
             parser.skip(o_proj_size);
 
             // QK norm weights
             size_t q_norm_size = HEAD_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.q_norm_weight, q_norm_size));
-            const __nv_bfloat16* nv_q_norm = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_q_norm, layer.attention.q_norm_weight, HEAD_DIM);
+            const void* qn_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(qn_src, layer.attention.q_norm_weight, HEAD_DIM);
             parser.skip(q_norm_size);
 
             size_t k_norm_size = HEAD_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.k_norm_weight, k_norm_size));
-            const __nv_bfloat16* nv_k_norm = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_k_norm, layer.attention.k_norm_weight, HEAD_DIM);
+            const void* kn_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(kn_src, layer.attention.k_norm_weight, HEAD_DIM);
             parser.skip(k_norm_size);
 
             // FFN weights
             size_t gate_proj_size = HIDDEN_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.ffn.gate_proj_weight, gate_proj_size));
-            const __nv_bfloat16* nv_gate_proj = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_gate_proj, layer.ffn.gate_proj_weight, HIDDEN_DIM * DIM);
+            const void* gp_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(gp_src, layer.ffn.gate_proj_weight, HIDDEN_DIM * DIM);
             parser.skip(gate_proj_size);
 
             size_t up_proj_size = HIDDEN_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.ffn.up_proj_weight, up_proj_size));
-            const __nv_bfloat16* nv_up_proj = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_up_proj, layer.ffn.up_proj_weight, HIDDEN_DIM * DIM);
+            const void* up_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(up_src, layer.ffn.up_proj_weight, HIDDEN_DIM * DIM);
             parser.skip(up_proj_size);
 
             size_t down_proj_size = DIM * HIDDEN_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.ffn.down_proj_weight, down_proj_size));
-            const __nv_bfloat16* nv_down_proj = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_down_proj, layer.ffn.down_proj_weight, DIM * HIDDEN_DIM);
+            const void* dp_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(dp_src, layer.ffn.down_proj_weight, DIM * HIDDEN_DIM);
             parser.skip(down_proj_size);
 
             // Layer norm weights
             size_t input_layernorm_size = DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.input_layernorm_weight, input_layernorm_size));
-            const __nv_bfloat16* nv_input_layernorm = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_input_layernorm, layer.input_layernorm_weight, DIM);
+            const void* iln_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(iln_src, layer.input_layernorm_weight, DIM);
             parser.skip(input_layernorm_size);
 
             size_t post_attention_layernorm_size = DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.post_attention_layernorm_weight, post_attention_layernorm_size));
-            const __nv_bfloat16* nv_post_attention_layernorm = static_cast<const __nv_bfloat16*>(parser.data() + parser.tell());
-            convert_nv_to_hip_bfloat16_array(nv_post_attention_layernorm, layer.post_attention_layernorm_weight, DIM);
+            const void* pln_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+            copy_bf16_bytes_to_device(pln_src, layer.post_attention_layernorm_weight, DIM);
             parser.skip(post_attention_layernorm_size);
         }
 
