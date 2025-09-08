@@ -72,10 +72,14 @@ Assume that downloaded hugging face dir is `<model_dir>`.
 We convert the Hugging Face tokenizer into the format used by `qwen600`.
 
 ```bash
-python export.py <model_dir>
+# IMPORTANT: <model_dir> must be a LOCAL directory (not a repo ID)
+python -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-0.6B', local_dir='Qwen3-0.6B')"
+python export.py Qwen3-0.6B
 ```
 
-That gonna output some template files and most importantly: `tokenizer.bin`
+This writes `tokenizer.bin` and `template_*.txt` into `<model_dir>`.
+If you pass a repo ID like `Qwen/Qwen3-0.6B`, you will get an error because the
+script treats the argument as a filesystem path.
 
 ### Building qwen600
 
@@ -235,7 +239,7 @@ This repository now includes an AMD ROCm/HIP version for AMD GPUs! The HIP versi
 - **Multi-GPU architecture support** - gfx906, gfx908, gfx90a, gfx1030, gfx1100
 - **Optimized softmax implementation** with shared memory
 - **BFloat16 support** with conversion utilities
-- **Same API compatibility** as CUDA version
+- **Same API compatibility** as CUDA versiona
 
 ### 📁 **HIP Files:**
 - `main.hip` - AMD ROCm/HIP main application
@@ -262,6 +266,27 @@ chmod +x build_hip.sh
 build_hip.bat
 ```
 
+#### Targeting your AMD GPU architecture (ROCm)
+- Detect your GPU architecture string (e.g. `gfx942`, `gfx1030`):
+  ```bash
+  rocminfo | grep -m1 -E 'Name:.*gfx' || /opt/rocm/bin/rocminfo | grep -m1 -E 'Name:.*gfx'
+  ```
+- You can rebuild specifying the exact arch without editing files:
+  ```bash
+  cd build_hip
+  cmake -S . -B . -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=hipcc -DCMAKE_HIP_ARCHITECTURES="gfx942"
+  make -j$(nproc)
+  ```
+- Or edit `CMakeLists.hip.txt` and set:
+  ```cmake
+  set(CMAKE_HIP_ARCHITECTURES "gfx942")
+  target_compile_options(qwen600_hip PRIVATE $<$<COMPILE_LANGUAGE:HIP>:--offload-arch=gfx942>)
+  ```
+
+#### hipCUB note
+hipCUB is header-only on many ROCm installs. If you hit a link error like `-lhipcub not found`,
+this repo’s `CMakeLists.hip.txt` already uses header includes and does not link against `hipcub`.
+
 #### **Manual Build:**
 ```bash
 mkdir build_hip && cd build_hip
@@ -281,6 +306,13 @@ make -j$(nproc)
 # Example
 ./build_hip/qwen600_hip ./models/qwen600 -r 1
 ```
+
+Notes:
+- `<model_dir>` must contain `model.safetensors`, `tokenizer.bin`, and `template_*.txt`.
+- To generate `tokenizer.bin`/templates, run `python export.py <local_model_dir>`.
+- If you see messages like `HIP error in softmax kernel: invalid device function`, the code
+  falls back to a portable simple softmax kernel automatically; this is expected on some
+  architectures and does not affect correctness.
 
 ### 📊 **Performance:**
 - **Same performance characteristics** as CUDA version (theoretically)
