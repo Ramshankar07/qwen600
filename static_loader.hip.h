@@ -170,20 +170,35 @@ public:
     const void* raw_data() const { return data; }
 };
 
-// Load weights from SafeTensor file
+// Load weights
+// Prefer ordered blob (weights_qwen600.bin) if present; otherwise fallback to safetensors
 void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
 {
     try
     {
-        MemoryMappedFile file(checkpoint_path);
-        SafeTensorParser parser(file.data(), file.size());
+        // Try ordered blob alongside the safetensors file
+        std::string dir = ".";
+        {
+            size_t p = checkpoint_path.find_last_of("/\\");
+            if (p != std::string::npos) dir = checkpoint_path.substr(0, p);
+        }
+        std::string ordered_blob = dir + "/weights_qwen600.bin";
+        bool use_blob = false;
+        size_t cursor = 0;
 
-        // Parse SafeTensor header
-        uint64_t header_size = parser.read<uint64_t>();
-        std::string header_json(static_cast<const char*>(file.data()) + 8, header_size);
-        
-        // Skip header
-        parser.seek(8 + header_size);
+        // Map whichever source we will read from
+        MemoryMappedFile st_file(checkpoint_path);
+        MemoryMappedFile blob_file(ordered_blob);
+        if (blob_file.size() > 0) { use_blob = true; }
+
+        SafeTensorParser parser(st_file.data(), st_file.size());
+        if (!use_blob)
+        {
+            // Parse SafeTensor header and skip to first tensor
+            uint64_t header_size = parser.read<uint64_t>();
+            (void)header_size;
+            parser.seek(8 + header_size);
+        }
 
         // Allocate memory for weights
         weights.token_embedding_table = nullptr;
@@ -191,26 +206,36 @@ void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
         weights.final_norm_weight = nullptr;
         weights.layers.resize(N_LAYERS);
 
+        auto copy_next = [&](bf16* dst, size_t count){
+            if (use_blob)
+            {
+                const uint8_t* base = static_cast<const uint8_t*>(blob_file.data());
+                const void* src = base + cursor;
+                copy_bf16_bytes_to_device(src, dst, count);
+                cursor += count * sizeof(bf16);
+            }
+            else
+            {
+                const void* src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
+                copy_bf16_bytes_to_device(src, dst, count);
+                parser.skip(count * sizeof(bf16));
+            }
+        };
+
         // Load token embedding table
         size_t token_embedding_size = VOCAB_SIZE * DIM * sizeof(bf16);
         HIP_CHECK(hipMalloc(&weights.token_embedding_table, token_embedding_size));
-        const void* te_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-        copy_bf16_bytes_to_device(te_src, weights.token_embedding_table, VOCAB_SIZE * DIM);
-        parser.skip(token_embedding_size);
+        copy_next(weights.token_embedding_table, VOCAB_SIZE * DIM);
 
         // Load output head weight
         size_t output_head_size = VOCAB_SIZE * DIM * sizeof(bf16);
         HIP_CHECK(hipMalloc(&weights.output_head_weight, output_head_size));
-        const void* oh_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-        copy_bf16_bytes_to_device(oh_src, weights.output_head_weight, VOCAB_SIZE * DIM);
-        parser.skip(output_head_size);
+        copy_next(weights.output_head_weight, VOCAB_SIZE * DIM);
 
         // Load final norm weight
         size_t final_norm_size = DIM * sizeof(bf16);
         HIP_CHECK(hipMalloc(&weights.final_norm_weight, final_norm_size));
-        const void* fn_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-        copy_bf16_bytes_to_device(fn_src, weights.final_norm_weight, DIM);
-        parser.skip(final_norm_size);
+        copy_next(weights.final_norm_weight, DIM);
 
         // Load layer weights
         for (int l = 0; l < N_LAYERS; l++)
@@ -220,72 +245,50 @@ void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
             // Attention weights
             size_t q_proj_size = Q_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.q_proj_weight, q_proj_size));
-            const void* q_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(q_src, layer.attention.q_proj_weight, Q_DIM * DIM);
-            parser.skip(q_proj_size);
+            copy_next(layer.attention.q_proj_weight, Q_DIM * DIM);
 
             size_t k_proj_size = KV_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.k_proj_weight, k_proj_size));
-            const void* k_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(k_src, layer.attention.k_proj_weight, KV_DIM * DIM);
-            parser.skip(k_proj_size);
+            copy_next(layer.attention.k_proj_weight, KV_DIM * DIM);
 
             size_t v_proj_size = KV_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.v_proj_weight, v_proj_size));
-            const void* v_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(v_src, layer.attention.v_proj_weight, KV_DIM * DIM);
-            parser.skip(v_proj_size);
+            copy_next(layer.attention.v_proj_weight, KV_DIM * DIM);
 
             size_t o_proj_size = DIM * Q_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.o_proj_weight, o_proj_size));
-            const void* o_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(o_src, layer.attention.o_proj_weight, DIM * Q_DIM);
-            parser.skip(o_proj_size);
+            copy_next(layer.attention.o_proj_weight, DIM * Q_DIM);
 
             // QK norm weights
             size_t q_norm_size = HEAD_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.q_norm_weight, q_norm_size));
-            const void* qn_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(qn_src, layer.attention.q_norm_weight, HEAD_DIM);
-            parser.skip(q_norm_size);
+            copy_next(layer.attention.q_norm_weight, HEAD_DIM);
 
             size_t k_norm_size = HEAD_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.attention.k_norm_weight, k_norm_size));
-            const void* kn_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(kn_src, layer.attention.k_norm_weight, HEAD_DIM);
-            parser.skip(k_norm_size);
+            copy_next(layer.attention.k_norm_weight, HEAD_DIM);
 
             // FFN weights
             size_t gate_proj_size = HIDDEN_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.ffn.gate_proj_weight, gate_proj_size));
-            const void* gp_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(gp_src, layer.ffn.gate_proj_weight, HIDDEN_DIM * DIM);
-            parser.skip(gate_proj_size);
+            copy_next(layer.ffn.gate_proj_weight, HIDDEN_DIM * DIM);
 
             size_t up_proj_size = HIDDEN_DIM * DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.ffn.up_proj_weight, up_proj_size));
-            const void* up_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(up_src, layer.ffn.up_proj_weight, HIDDEN_DIM * DIM);
-            parser.skip(up_proj_size);
+            copy_next(layer.ffn.up_proj_weight, HIDDEN_DIM * DIM);
 
             size_t down_proj_size = DIM * HIDDEN_DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.ffn.down_proj_weight, down_proj_size));
-            const void* dp_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(dp_src, layer.ffn.down_proj_weight, DIM * HIDDEN_DIM);
-            parser.skip(down_proj_size);
+            copy_next(layer.ffn.down_proj_weight, DIM * HIDDEN_DIM);
 
             // Layer norm weights
             size_t input_layernorm_size = DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.input_layernorm_weight, input_layernorm_size));
-            const void* iln_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(iln_src, layer.input_layernorm_weight, DIM);
-            parser.skip(input_layernorm_size);
+            copy_next(layer.input_layernorm_weight, DIM);
 
             size_t post_attention_layernorm_size = DIM * sizeof(bf16);
             HIP_CHECK(hipMalloc(&layer.post_attention_layernorm_weight, post_attention_layernorm_size));
-            const void* pln_src = static_cast<const uint8_t*>(parser.raw_data()) + parser.tell();
-            copy_bf16_bytes_to_device(pln_src, layer.post_attention_layernorm_weight, DIM);
-            parser.skip(post_attention_layernorm_size);
+            copy_next(layer.post_attention_layernorm_weight, DIM);
         }
 
         std::cout << "Successfully loaded Qwen weights from: " << checkpoint_path << std::endl;
