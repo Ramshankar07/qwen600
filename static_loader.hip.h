@@ -186,10 +186,20 @@ void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
         bool use_blob = false;
         size_t cursor = 0;
 
-        // Map whichever source we will read from
+        // Map whichever source we will read from, with robust checks
         MemoryMappedFile st_file(checkpoint_path);
-        MemoryMappedFile blob_file(ordered_blob);
-        if (blob_file.size() > 0) { use_blob = true; }
+        MemoryMappedFile* blob_file_ptr = nullptr;
+        struct stat st_blob;
+        if (stat(ordered_blob.c_str(), &st_blob) == 0 && S_ISREG(st_blob.st_mode) && st_blob.st_size > 0)
+        {
+            try {
+                blob_file_ptr = new MemoryMappedFile(ordered_blob);
+                use_blob = blob_file_ptr->size() > 0;
+            } catch (const std::exception& e) {
+                fprintf(stderr, "Warning: Failed to open ordered blob '%s': %s\n", ordered_blob.c_str(), e.what());
+                use_blob = false;
+            }
+        }
 
         SafeTensorParser parser(st_file.data(), st_file.size());
         if (!use_blob)
@@ -209,7 +219,7 @@ void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
         auto copy_next = [&](bf16* dst, size_t count){
             if (use_blob)
             {
-                const uint8_t* base = static_cast<const uint8_t*>(blob_file.data());
+                const uint8_t* base = static_cast<const uint8_t*>(blob_file_ptr->data());
                 const void* src = base + cursor;
                 copy_bf16_bytes_to_device(src, dst, count);
                 cursor += count * sizeof(bf16);
@@ -291,7 +301,8 @@ void load_qwen_weights(const std::string& checkpoint_path, QwenWeights& weights)
             copy_next(layer.post_attention_layernorm_weight, DIM);
         }
 
-        std::cout << "Successfully loaded Qwen weights from: " << checkpoint_path << std::endl;
+        std::cout << "Successfully loaded Qwen weights from: " << (use_blob ? ordered_blob : checkpoint_path) << std::endl;
+        if (blob_file_ptr) { delete blob_file_ptr; blob_file_ptr = nullptr; }
     }
     catch (const std::exception& e)
     {

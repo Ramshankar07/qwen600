@@ -62,25 +62,33 @@ typedef struct
 
 
 // ---------------------------------------------------------------
-// bf16 <-> float helpers for ROCm hip_bfloat16
+// bf16 <-> float helpers for ROCm hip_bfloat16 (device-safe)
 // ---------------------------------------------------------------
-__device__ __host__ inline float hip_bf16_to_float(const bf16 v)
+__device__ __host__ inline float load_bf16_as_f32(const bf16* ptr, int index)
 {
-    // hip_bfloat16 stores the high 16 bits of IEEE754 float
-    uint32_t bits = static_cast<uint32_t>(*(const uint16_t*)&v) << 16;
+    const uint16_t* p = reinterpret_cast<const uint16_t*>(ptr);
+    uint16_t h = p[index];
+    uint32_t u = static_cast<uint32_t>(h) << 16;
+#ifdef __HIP_DEVICE_COMPILE__
+    return __uint_as_float(u);
+#else
     float f;
-    memcpy(&f, &bits, sizeof(float));
+    memcpy(&f, &u, sizeof(float));
     return f;
+#endif
 }
 
-__device__ __host__ inline bf16 float_to_hip_bf16(const float f)
+__device__ inline void store_f32_as_bf16(bf16* ptr, int index, float f)
 {
-    uint32_t bits;
-    memcpy(&bits, &f, sizeof(uint32_t));
-    uint16_t high = static_cast<uint16_t>(bits >> 16);
-    bf16 v;
-    *(uint16_t*)&v = high;
-    return v;
+    uint32_t u;
+#ifdef __HIP_DEVICE_COMPILE__
+    u = __float_as_uint(f);
+#else
+    memcpy(&u, &f, sizeof(uint32_t));
+#endif
+    uint16_t h = static_cast<uint16_t>(u >> 16);
+    uint16_t* p = reinterpret_cast<uint16_t*>(ptr);
+    p[index] = h;
 }
 
 
@@ -152,7 +160,7 @@ rms_norm_kernel(
     float lsum = 0.0f;
     for (int i = t_idx; i < (int)D; i += THREADS_PER_BLOCK)
     {
-        float vx = hip_bf16_to_float(X[i]);
+        float vx = load_bf16_as_f32(X, i);
         lsum += vx * vx;
     }
 
@@ -166,10 +174,10 @@ rms_norm_kernel(
 
     for (int i = t_idx; i < (int)D; i += THREADS_PER_BLOCK)
     {
-        float xi = hip_bf16_to_float(X[i]);
-        float wi = hip_bf16_to_float(weight[i]);
+        float xi = load_bf16_as_f32(X, i);
+        float wi = load_bf16_as_f32(weight, i);
         float yi = (xi * mul_val) * wi;
-        Y[i] = float_to_hip_bf16(yi);
+        store_f32_as_bf16(Y, i, yi);
     }
 }
 
@@ -201,7 +209,7 @@ fused_multi_rmsnorm_kernel(
     float lsum = 0.0f;
     for (int i = t_idx; i < HEAD_DIM; i += THREADS_PER_BLOCK)
     {
-        float v = hip_bf16_to_float(vec_start[i]);
+        float v = load_bf16_as_f32(vec_start, i);
         lsum += v * v;
     }
 
@@ -215,9 +223,9 @@ fused_multi_rmsnorm_kernel(
 
     for (int i = t_idx; i < HEAD_DIM; i += THREADS_PER_BLOCK)
     {
-        float vi = hip_bf16_to_float(vec_start[i]);
-        float wi = hip_bf16_to_float(weight[i]);
-        vec_start[i] = float_to_hip_bf16((vi * mul_val) * wi);
+        float vi = load_bf16_as_f32(vec_start, i);
+        float wi = load_bf16_as_f32(weight, i);
+        store_f32_as_bf16(vec_start, i, (vi * mul_val) * wi);
     }
 }
 
@@ -261,23 +269,23 @@ rope_kernel(
 
     // rotate Q
     int r_idx = i * 2;
-    float qr = hip_bf16_to_float(q[r_idx]);
-    float qi = hip_bf16_to_float(q[r_idx + 1]);
+    float qr = load_bf16_as_f32(q, r_idx);
+    float qi = load_bf16_as_f32(q, r_idx + 1);
     float q0 = qr * fcr - qi * fci;
     float q1 = qr * fci + qi * fcr;
-    q[r_idx]     = float_to_hip_bf16(q0);
-    q[r_idx + 1] = float_to_hip_bf16(q1);
+    store_f32_as_bf16(q, r_idx, q0);
+    store_f32_as_bf16(q, r_idx + 1, q1);
 
     if (i < KV_DIM / 2)
     {
         // rotate K
         int kr = i * 2;
-        float krf = hip_bf16_to_float(k[kr]);
-        float kif = hip_bf16_to_float(k[kr + 1]);
+        float krf = load_bf16_as_f32(k, kr);
+        float kif = load_bf16_as_f32(k, kr + 1);
         float k0 = krf * fcr - kif * fci;
         float k1 = krf * fci + kif * fcr;
-        k[kr]     = float_to_hip_bf16(k0);
-        k[kr + 1] = float_to_hip_bf16(k1);
+        store_f32_as_bf16(k, kr, k0);
+        store_f32_as_bf16(k, kr + 1, k1);
     }
 }
     
@@ -312,14 +320,14 @@ qwen_naive_rope_kernel(
         float fcr, fci;
         sincosf(val, &fci, &fcr);
 
-        float q_real = hip_bf16_to_float(q_head[j]);
-        float q_imag = hip_bf16_to_float(q_head[j + HEAD_DIM / 2]);
+        float q_real = load_bf16_as_f32(q_head, j);
+        float q_imag = load_bf16_as_f32(q_head, j + HEAD_DIM / 2);
 
         float q_rotated_real = q_real * fcr - q_imag * fci;
         float q_rotated_imag = q_real * fci + q_imag * fcr;
 
-        q_head[j]              = float_to_hip_bf16(q_rotated_real);
-        q_head[j + HEAD_DIM/2] = float_to_hip_bf16(q_rotated_imag);
+        store_f32_as_bf16(q_head, j, q_rotated_real);
+        store_f32_as_bf16(q_head, j + HEAD_DIM/2, q_rotated_imag);
     }
 
     if (h < N_KV_HEADS && j < HEAD_DIM / 2)
@@ -331,15 +339,15 @@ qwen_naive_rope_kernel(
         float fcr, fci;
         sincosf(val, &fci, &fcr);
 
-        float k_real = hip_bf16_to_float(k_head[j]);
-        float k_imag = hip_bf16_to_float(k_head[j + HEAD_DIM / 2]);
+        float k_real = load_bf16_as_f32(k_head, j);
+        float k_imag = load_bf16_as_f32(k_head, j + HEAD_DIM / 2);
 
         // perform rotation in fp32
         float k_rotated_real = k_real * fcr - k_imag * fci;
         float k_rotated_imag = k_real * fci + k_imag * fcr;
 
-        k_head[j]              = float_to_hip_bf16(k_rotated_real);
-        k_head[j + HEAD_DIM/2] = float_to_hip_bf16(k_rotated_imag);
+        store_f32_as_bf16(k_head, j, k_rotated_real);
+        store_f32_as_bf16(k_head, j + HEAD_DIM/2, k_rotated_imag);
     }
 }
 
@@ -518,8 +526,8 @@ attention_qk_kernel(
         float score = 0.0f;
         for (int i = 0; i < HEAD_DIM; i++)
         {
-            float qv = hip_bf16_to_float(q_head[i]);
-            float kv = hip_bf16_to_float(k_vec[i]);
+            float qv = load_bf16_as_f32(q_head, i);
+            float kv = load_bf16_as_f32(k_vec, i);
             score = __fmaf_rn(qv, kv, score);
         }
 
@@ -549,9 +557,9 @@ attention_v_kernel(
     {
         const bf16* v_vec = v_cache + (size_t)t * KV_DIM + (size_t)kv_head_idx * HEAD_DIM;
 
-        weighted_sum = __fmaf_rn(att_head[t], hip_bf16_to_float(v_vec[i]), weighted_sum);
+        weighted_sum = __fmaf_rn(att_head[t], load_bf16_as_f32(v_vec, i), weighted_sum);
     }
-    out_head[i] = float_to_hip_bf16(weighted_sum);
+    store_f32_as_bf16(out_head, i, weighted_sum);
 }
 
 void
@@ -590,10 +598,10 @@ add_residual_kernel(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size)
     {
-        float x_fp32 = hip_bf16_to_float(x[i]);
-        float res_fp32 = hip_bf16_to_float(residual[i]);
+        float x_fp32 = load_bf16_as_f32(x, i);
+        float res_fp32 = load_bf16_as_f32(residual, i);
         float result_fp32 = x_fp32 + res_fp32;
-        x[i] = float_to_hip_bf16(result_fp32);
+        store_f32_as_bf16(x, i, result_fp32);
     }
 }
 
@@ -620,14 +628,14 @@ swiglu_kernel(
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size)
     {
-        float hb_fp32 = hip_bf16_to_float(hb[i]);
-        float hb2_fp32 = hip_bf16_to_float(hb2[i]);
+        float hb_fp32 = load_bf16_as_f32(hb, i);
+        float hb2_fp32 = load_bf16_as_f32(hb2, i);
         
-        // SwiGLU: hb[i] = hb[i] * sigmoid(hb2[i])
-        float sigmoid_val = 1.0f / (1.0f + expf(-hb2_fp32));
-        float result = hb_fp32 * sigmoid_val;
+        // SwiGLU: commonly (gate) * swish(x) or elementwise product then swish
+        // More appropriate variant per request:
+        float result = (hb_fp32 * hb2_fp32) / (1.0f + expf(-hb_fp32));
         
-        hb[i] = float_to_hip_bf16(result);
+        store_f32_as_bf16(hb, i, result);
     }
 }
 
@@ -695,7 +703,7 @@ convert_bf16_to_fp32_kernel(
     int n)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n){ fp32_out[i] = hip_bf16_to_float(bf16_in[i]); }
+    if (i < n){ fp32_out[i] = load_bf16_as_f32(bf16_in, i); }
 }
 
 float* forward(
