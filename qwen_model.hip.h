@@ -666,13 +666,13 @@ matvec_kernel(const bf16* __restrict__ A,  // (M x K), row-major assumption
     const bf16* a_row = A + (size_t)row * K;
     for (int k = 0; k < K; ++k)
     {
-        float av = hip_bf16_to_float(a_row[k]);
-        float xv = hip_bf16_to_float(x[k]);
+        float av = load_bf16_as_f32(a_row, k);
+        float xv = load_bf16_as_f32(x, k);
         sum = __fmaf_rn(av, xv, sum);
     }
-    float y_old = hip_bf16_to_float(y[row]);
+    float y_old = load_bf16_as_f32(y, row);
     float y_new = alpha * sum + beta * y_old;
-    y[row] = float_to_hip_bf16(y_new);
+    store_f32_as_bf16(y, row, y_new);
 }
 
 void
