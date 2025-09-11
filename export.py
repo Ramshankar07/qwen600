@@ -12,6 +12,7 @@ from pathlib import Path
 import json
 from jinja2 import Template
 import struct
+import numpy as np
 
 DTYPE_SIZES = {
     'BF16': 2,
@@ -120,10 +121,27 @@ def export_weights(model_dir):
                 if dtype not in ('BF16','F16','F32'):
                     raise ValueError(f'Unsupported dtype {dtype} for {name}')
                 fp.seek(8 + header_size + offsets[0])
-                chunk = fp.read(byte_len)
-                if len(chunk) != byte_len:
+                raw = fp.read(byte_len)
+                if len(raw) != byte_len:
                     raise ValueError(f'Failed to read bytes for {name}')
-                out_f.write(chunk)
+                # Convert to bf16 if needed
+                if dtype == 'BF16':
+                    out_f.write(raw)
+                else:
+                    # interpret and convert
+                    if dtype == 'F16':
+                        arr = np.frombuffer(raw, dtype=np.float16)
+                    elif dtype == 'F32':
+                        arr = np.frombuffer(raw, dtype=np.float32)
+                    else:
+                        raise ValueError(f'Unexpected dtype {dtype}')
+                    # reshape for safety then flatten back
+                    numel = np.prod(shape, dtype=np.int64)
+                    if arr.size != numel:
+                        raise ValueError(f'Element count mismatch for {name}: {arr.size} vs {numel}')
+                    arr = arr.reshape(shape)
+                    arr_bf16 = arr.astype(np.float32).astype(np.bfloat16)
+                    out_f.write(arr_bf16.tobytes())
 
         print(f"Written ordered weight blob to {out_path}")
 
